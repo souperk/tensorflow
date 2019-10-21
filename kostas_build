@@ -1,0 +1,32 @@
+#!/bin/bash
+
+echo "===== Installing Requirements ====="
+
+# install requirements
+pip install -U --user pip six numpy wheel setuptools mock 'future>=0.17.1'
+pip install -U --user keras_applications==1.0.6 --no-deps
+pip install -U --user keras_preprocessing==1.0.5 --no-deps
+
+echo "===== Building Tensorflow ====="
+
+# build tensorflow from source code
+bazel build --config=v2 --jobs=6 //tensorflow/tools/pip_package:build_pip_package
+
+echo "===== Cleaning Previous Packages ====="
+rm /tmp/tensorflow_pkg/*
+
+echo "===== Creating Package ====="
+# create pip package at directory /tmp/tensorflow_pkg
+./bazel-bin/tensorflow/tools/pip_package/build_pip_package /tmp/tensorflow_pkg
+
+echo "===== Deploying Package ====="
+
+# install new pip package at ../examples/venv
+source ../examples/venv/bin/activate
+
+pip install --upgrade $(ls /tmp/tensorflow_pkg/*.whl)
+pip install --upgrade numpy==1.16.4
+
+dectivate 
+echo "===== Package Deployed ====="
+

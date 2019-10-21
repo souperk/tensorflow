@@ -1,0 +1,11 @@
+#!/bin/bash
+
+echo "===== Deploying Package ====="
+source ../examples/venv/bin/activate
+
+pip install --upgrade $(ls /tmp/tensorflow_pkg/*.whl)
+pip install --upgrade numpy==1.16.4
+
+dectivate 
+echo "===== Package Deployed ====="
+

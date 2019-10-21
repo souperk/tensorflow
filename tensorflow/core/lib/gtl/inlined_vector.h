@@ -17,8 +17,10 @@ limitations under the License.
 #define TENSORFLOW_CORE_LIB_GTL_INLINED_VECTOR_H_
 
 #include "absl/container/inlined_vector.h"
+
 // TODO(kramerb): This is kept only because lots of targets transitively depend
 // on it. Remove all targets' dependencies.
+
 #include "tensorflow/core/platform/macros.h"
 #include "tensorflow/core/platform/types.h"
 

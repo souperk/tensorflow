@@ -23,6 +23,7 @@ limitations under the License.
 
 namespace tensorflow {
 namespace data {
+
 namespace {
 
 typedef gtl::InlinedVector<TensorValue, 4> TensorValueVec;
