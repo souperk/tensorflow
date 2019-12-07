@@ -1,13 +1,13 @@
 #ifndef TENSORFLOW_CORE_TENSORFLOW_CORE_COMMON_RUNTIME_EXECUTOR_GRAPH_VIEW_H_
 #define TENSORFLOW_CORE_TENSORFLOW_CORE_COMMON_RUNTIME_EXECUTOR_GRAPH_VIEW_H_
 
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/common_runtime/pending_counts.h"
 #include "tensorflow/core/framework/device_base.h"
-#include "tensorflow/core/common_runtime/device.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
+#include "tensorflow/core/graph/graph.h"
+#include "tensorflow/core/lib/core/status.h"
 
 namespace tensorflow {
 namespace executor {
@@ -18,6 +18,8 @@ struct EdgeInfo {
   // true if this is the last info for output_slot in the EdgeInfo list.
   bool is_last : 1;
   int input_slot;
+
+
 };
 
 struct NodeItem {
@@ -29,10 +31,10 @@ struct NodeItem {
   // The kernel for this node.
   OpKernel *kernel = nullptr;
 
-  bool kernel_is_async : 1;     // True iff kernel->AsAsync() != nullptr
-  bool is_merge : 1;            // True iff IsMerge(node)
-  bool is_enter : 1;            // True iff IsEnter(node)
-  bool is_constant_enter : 1;   // True iff IsEnter(node) and
+  bool kernel_is_async : 1;    // True iff kernel->AsAsync() != nullptr
+  bool is_merge : 1;           // True iff IsMerge(node)
+  bool is_enter : 1;           // True iff IsEnter(node)
+  bool is_constant_enter : 1;  // True iff IsEnter(node) and
   // node->GetAttr("is_constant") == true.
   bool is_exit : 1;             // True iff IsExit(node)
   bool is_control_trigger : 1;  // True iff IsControlTrigger(node)
@@ -50,10 +52,12 @@ struct NodeItem {
   int input_start = 0;
 
   // Number of output edges.
+  size_t num_input_edges;
   size_t num_output_edges;
 
   PendingCounts::Handle pending_id;
 
+  const EdgeInfo *input_edge_list() const { return input_edge_base(); }
   const EdgeInfo *output_edge_list() const { return output_edge_base(); }
 
   // ith output edge.
@@ -96,31 +100,50 @@ struct NodeItem {
 
   // Return pointer to variable length section.
   char *var() const {
-    return const_cast<char *>(reinterpret_cast<const char *>(this) +
-        sizeof(NodeItem));
+    return const_cast<char *>(
+        reinterpret_cast<const char *>(this)
+            + sizeof(NodeItem));
+  }
+
+  EdgeInfo *input_edge_base() const {
+    return reinterpret_cast<EdgeInfo *>(var());
   }
 
   EdgeInfo *output_edge_base() const {
-    return reinterpret_cast<EdgeInfo *>(var());
+    return reinterpret_cast<EdgeInfo *>(
+        var()
+            + (sizeof(EdgeInfo) * num_input_edges));
   }
   AllocatorAttributes *output_attr_base() const {
-    return reinterpret_cast<AllocatorAttributes *>(var() + sizeof(EdgeInfo) *
-        num_output_edges);
+    return reinterpret_cast<AllocatorAttributes *>(
+        var()
+            + (sizeof(EdgeInfo) * num_input_edges)
+            + (sizeof(EdgeInfo) * num_output_edges));
   }
+
   int *forward_from_base() const {
-    return reinterpret_cast<int *>(var() + sizeof(EdgeInfo) * num_output_edges +
-        sizeof(AllocatorAttributes) * num_outputs);
+    return reinterpret_cast<int *>(
+        var()
+            + (sizeof(EdgeInfo) * num_input_edges)
+            + (sizeof(EdgeInfo) * num_output_edges)
+            + (sizeof(AllocatorAttributes) * num_outputs));
   }
   uint8 *input_type_base() const {
     return reinterpret_cast<uint8 *>(
-        var() + sizeof(EdgeInfo) * num_output_edges +
-            sizeof(AllocatorAttributes) * num_outputs + sizeof(int) * num_outputs);
+        var()
+            + (sizeof(EdgeInfo) * num_input_edges)
+            + (sizeof(EdgeInfo) * num_output_edges)
+            + (sizeof(AllocatorAttributes) * num_outputs)
+            + (sizeof(int) * num_outputs));
   }
   uint8 *output_type_base() const {
     return reinterpret_cast<uint8 *>(
-        var() + sizeof(EdgeInfo) * num_output_edges +
-            sizeof(AllocatorAttributes) * num_outputs + sizeof(int) * num_outputs +
-            sizeof(uint8) * num_inputs);
+        var()
+            + (sizeof(EdgeInfo) * num_input_edges)
+            + (sizeof(EdgeInfo) * num_output_edges)
+            + (sizeof(AllocatorAttributes) * num_outputs)
+            + (sizeof(int) * num_outputs)
+            + (sizeof(uint8) * num_inputs));
   }
 
   TF_DISALLOW_COPY_AND_ASSIGN(NodeItem);
@@ -158,8 +181,8 @@ class GraphView {
   TF_DISALLOW_COPY_AND_ASSIGN(GraphView);
 };
 
-} //namespace executor
+}  // namespace executor
 
-} //namespace tensorflow
+}  // namespace tensorflow
 
-#endif //TENSORFLOW_CORE_TENSORFLOW_CORE_COMMON_RUNTIME_EXECUTOR_GRAPH_VIEW_H_
+#endif  // TENSORFLOW_CORE_TENSORFLOW_CORE_COMMON_RUNTIME_EXECUTOR_GRAPH_VIEW_H_

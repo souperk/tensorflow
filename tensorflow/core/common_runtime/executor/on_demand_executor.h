@@ -12,8 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef CORE_COMMON_RUNTIME_ON_DEMAND_EXECUTOR_H_
-#define CORE_COMMON_RUNTIME_ON_DEMAND_EXECUTOR_H_
+#ifndef TENSORFLOW_CORE_COMMON_RUNTIME_EXECUTOR_ON_DEMAND_EXECUTOR_H_
+#define TENSORFLOW_CORE_COMMON_RUNTIME_EXECUTOR_ON_DEMAND_EXECUTOR_H_
 
 #include "tensorflow/core/common_runtime/executor.h"
 
@@ -25,4 +25,4 @@ Status NewOnDemandExecutor(const LocalExecutorParams &params,
 
 } // namespace tensorflow
 
-#endif //CORE_COMMON_RUNTIME_ON_DEMAND_EXECUTOR_H_
+#endif //TENSORFLOW_CORE_COMMON_RUNTIME_EXECUTOR_ON_DEMAND_EXECUTOR_H_

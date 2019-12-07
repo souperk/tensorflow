@@ -3,27 +3,25 @@
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/framework/types.pb.h"
 
-
 namespace tensorflow {
 namespace executor {
-
 
 // If a Node has been marked to use a ScopedAllocator x for output i, then
 // sc_attr will contain the subsequence (i, x) at an even offset.  This function
 // extracts and transfers that ScopedAllocator id to alloc_attr.  For now, we
 // only allow one ScopedAllocator use per Node.
-bool ExtractScopedAllocatorAttr(const std::vector<int> &sc_attr,
+bool ExtractScopedAllocatorAttr(const std::vector<int>& sc_attr,
                                 int output_index,
-                                AllocatorAttributes *alloc_attr);
+                                AllocatorAttributes* alloc_attr);
 
 // Infer memory allocation attributes of a node n's output,
 // based on its use node dst.  Note that dst might not be directly
 // connected to n by a single edge, but might be a downstream
 // consumer of n's output by reference.  *attr is updated with any
 // necessary attributes.
-Status InferAllocAttr(const Node *n, const Node *dst,
-                      const DeviceNameUtils::ParsedName &local_dev_name,
-                      AllocatorAttributes *attr);
+Status InferAllocAttr(const Node* n, const Node* dst,
+                      const DeviceNameUtils::ParsedName& local_dev_name,
+                      AllocatorAttributes* attr);
 
 GraphView::~GraphView() {
   static_assert(std::is_trivially_destructible<AllocatorAttributes>::value,
@@ -31,7 +29,7 @@ GraphView::~GraphView() {
   static_assert(std::is_trivially_destructible<EdgeInfo>::value,
                 "Update code if EdgeInfo gains a destructor");
   for (int i = 0; i < num_nodes_; i++) {
-    NodeItem *n = node(i);
+    NodeItem* n = node(i);
     if (n != nullptr) {
       n->NodeItem::~NodeItem();
       // Memory for "n" itself is held in space_ & gets cleaned up below
@@ -41,7 +39,8 @@ GraphView::~GraphView() {
   delete[] space_;
 }
 
-size_t GraphView::NodeItemBytes(const Node *n) {
+size_t GraphView::NodeItemBytes(const Node* n) {
+  const size_t num_input_edges = n->in_edges().size();
   const size_t num_output_edges = n->out_edges().size();
   const int num_inputs = n->num_inputs();
   const int num_outputs = n->num_outputs();
@@ -51,12 +50,13 @@ size_t GraphView::NodeItemBytes(const Node *n) {
   // both be zero.
   const size_t raw_bytes =
       sizeof(NodeItem)                             // Fixed
-          + num_output_edges * sizeof(EdgeInfo)        // output_edges[...]
-          + num_outputs * sizeof(AllocatorAttributes)  // output_attr[...]
-          + num_outputs * sizeof(int)                  // forward_from[num_outputs]
-          + num_inputs * sizeof(uint8)                 // input_type[num_inputs]
-          + num_outputs * sizeof(uint8);               // output_type[num_outputs]
-  static constexpr size_t kItemAlignment = sizeof(NodeItem *);
+      + num_input_edges * sizeof(EdgeInfo)         // input_edges[...]
+      + num_output_edges * sizeof(EdgeInfo)        // output_edges[...]
+      + num_outputs * sizeof(AllocatorAttributes)  // output_attr[...]
+      + num_outputs * sizeof(int)                  // forward_from[num_outputs]
+      + num_inputs * sizeof(uint8)                 // input_type[num_inputs]
+      + num_outputs * sizeof(uint8);               // output_type[num_outputs]
+  static constexpr size_t kItemAlignment = sizeof(NodeItem*);
   static_assert(kItemAlignment % alignof(NodeItem) == 0,
                 "NodeItem must be aligned with kItemAlignment");
   static_assert(kItemAlignment % alignof(EdgeInfo) == 0,
@@ -74,14 +74,14 @@ size_t GraphView::NodeItemBytes(const Node *n) {
   return bytes;
 }
 
-char *GraphView::InitializeNode(char *ptr, const Node *n) {
+char* GraphView::InitializeNode(char* ptr, const Node* n) {
   const int id = n->id();
   CHECK(node_offsets_[id] == kuint32max);  // Initial value in constructor
 
   const size_t bytes = NodeItemBytes(n);
-  constexpr size_t kItemAlignment = sizeof(NodeItem *);
+  constexpr size_t kItemAlignment = sizeof(NodeItem*);
   CHECK_EQ(reinterpret_cast<uintptr_t>(ptr) % kItemAlignment, 0);
-  NodeItem *item = reinterpret_cast<NodeItem *>(ptr);
+  NodeItem* item = reinterpret_cast<NodeItem*>(ptr);
 
   // We store a 32-bit offset relative to the beginning of space_, so that we
   // only need an array of 32-bit values to map from node id to the NodeItem*,
@@ -93,13 +93,15 @@ char *GraphView::InitializeNode(char *ptr, const Node *n) {
   node_offsets_[id] = offset;
   ptr += bytes;
 
+  const size_t num_input_edges = n->in_edges().size();
   const size_t num_output_edges = n->out_edges().size();
   const int num_inputs = n->num_inputs();
   const int num_outputs = n->num_outputs();
 
-  new(item) NodeItem();
+  new (item) NodeItem();
   item->num_inputs = num_inputs;
   item->num_outputs = num_outputs;
+  item->num_input_edges = num_input_edges;
   item->num_output_edges = num_output_edges;
 
   // Fill output edges.
@@ -107,8 +109,8 @@ char *GraphView::InitializeNode(char *ptr, const Node *n) {
   // a given output slot.  For all but the last, we need to do a copy of the
   // Tensor when propagating results downstream in the graph, but for the
   // last one, we can just do a move of the Tensor object to propagate it.
-  gtl::InlinedVector<EdgeInfo *, 4> last_indices(num_outputs, nullptr);
-  EdgeInfo *dst_edge = item->output_edge_base();
+  gtl::InlinedVector<EdgeInfo*, 4> last_indices(num_outputs, nullptr);
+  EdgeInfo* dst_edge = item->output_edge_base();
   for (auto e : n->out_edges()) {
     dst_edge->dst_id = e->dst()->id();
     CHECK_LE(e->src_output(), 0x3FFFFFFF);  // Must fit in 31 bits
@@ -121,19 +123,29 @@ char *GraphView::InitializeNode(char *ptr, const Node *n) {
     dst_edge->input_slot = e->dst_input();
     dst_edge++;
   }
-  for (EdgeInfo *edge_info : last_indices) {
+  for (EdgeInfo* edge_info : last_indices) {
     if (edge_info != nullptr) {
       edge_info->is_last = true;
     }
   }
 
-  AllocatorAttributes *output_attrs = item->output_attr_base();
+  EdgeInfo* src_edge = item->input_edge_base();
+  for (auto e : n->in_edges()) {
+    src_edge->dst_id = e->src()->id();
+    CHECK_LE(e->dst_input(), 0x3FFFFFFF);  // Must fit in 31 bits
+    src_edge->output_slot = e->dst_input();
+    src_edge->is_last = false;
+    src_edge->input_slot = e->src_output();
+    src_edge++;
+  }
+
+  AllocatorAttributes* output_attrs = item->output_attr_base();
   for (int i = 0; i < num_outputs; i++) {
-    new(&output_attrs[i]) AllocatorAttributes();
+    new (&output_attrs[i]) AllocatorAttributes();
   }
 
   DCHECK_LT(DataType_MAX, 255);  // Must fit in uint8
-  uint8 *input_types = item->input_type_base();
+  uint8* input_types = item->input_type_base();
   for (int i = 0; i < num_inputs; i++) {
     input_types[i] = static_cast<uint8>(n->input_type(i));
     DCHECK_EQ(item->input_type(i), n->input_type(i));
@@ -148,8 +160,8 @@ char *GraphView::InitializeNode(char *ptr, const Node *n) {
     Status sa_status =
         GetNodeAttr(n->attrs(), "_scoped_allocator", &scoped_allocator_attrs);
 
-    int *forward_from = item->forward_from_base();
-    uint8 *output_types = item->output_type_base();
+    int* forward_from = item->forward_from_base();
+    uint8* output_types = item->output_type_base();
     for (int i = 0; i < num_outputs; ++i) {
       output_types[i] = static_cast<uint8>(n->output_type(i));
       DCHECK_EQ(item->output_type(i), n->output_type(i));
@@ -183,12 +195,12 @@ char *GraphView::InitializeNode(char *ptr, const Node *n) {
   return ptr;
 }
 
-void GraphView::Initialize(const Graph *g) {
+void GraphView::Initialize(const Graph* g) {
   CHECK(node_offsets_ == nullptr);
   const int num_nodes = g->num_node_ids();
   num_nodes_ = num_nodes;
   size_t total_bytes = 0;
-  for (const Node *n : g->nodes()) {
+  for (const Node* n : g->nodes()) {
     total_bytes += NodeItemBytes(n);
   }
 
@@ -198,27 +210,27 @@ void GraphView::Initialize(const Graph *g) {
   }
 
   space_ = new char[total_bytes];  // NodeItem objects are allocated here
-  char *ptr = space_;
-  for (const Node *n : g->nodes()) {
+  char* ptr = space_;
+  for (const Node* n : g->nodes()) {
     ptr = InitializeNode(ptr, n);
   }
   CHECK_EQ(ptr, space_ + total_bytes);
 }
 
 void GraphView::SetScopedAllocatorAttrs(
-    const std::vector<const Node *> &sa_nodes) {
-  for (const Node *sa : sa_nodes) {
-    NodeItem *sa_item = node(sa->id());
-    AllocatorAttributes *sa_attrs = sa_item->output_attr_base();
+    const std::vector<const Node*>& sa_nodes) {
+  for (const Node* sa : sa_nodes) {
+    NodeItem* sa_item = node(sa->id());
+    AllocatorAttributes* sa_attrs = sa_item->output_attr_base();
     // Control edges out of the ScopedAllocator should be use instances, but may
     // include a few other nodes.
-    for (const auto &e : sa->out_edges()) {
+    for (const auto& e : sa->out_edges()) {
       if (!e->IsControlEdge()) {
         continue;
       }
-      Node *use_node = e->dst();
-      NodeItem *item = node(use_node->id());
-      AllocatorAttributes *use_attrs = item->output_attr_base();
+      Node* use_node = e->dst();
+      NodeItem* item = node(use_node->id());
+      AllocatorAttributes* use_attrs = item->output_attr_base();
       std::vector<int> scoped_allocator_attrs;
       Status s = GetNodeAttr(use_node->attrs(), "_scoped_allocator",
                              &scoped_allocator_attrs);
@@ -229,7 +241,7 @@ void GraphView::SetScopedAllocatorAttrs(
       }
       // There can be more than one output using ScopedAllocation, but this
       // analysis assumes they use the same ScopedAllocator.
-      for (const auto &e : use_node->out_edges()) {
+      for (const auto& e : use_node->out_edges()) {
         if (!e->IsControlEdge()) {
           AllocatorAttributes attr;
           if (ExtractScopedAllocatorAttr(scoped_allocator_attrs,
@@ -247,21 +259,21 @@ void GraphView::SetScopedAllocatorAttrs(
   }
 }
 
-Status GraphView::SetAllocAttrs(const Graph *g, const Device *device) {
+Status GraphView::SetAllocAttrs(const Graph* g, const Device* device) {
   Status s;
   DeviceNameUtils::ParsedName local_dev_name = device->parsed_name();
 
-  std::vector<const Node *> scoped_allocator_instances;
-  for (const Node *n : g->nodes()) {
-    NodeItem *item = node(n->id());
-    AllocatorAttributes *attrs = item->output_attr_base();
+  std::vector<const Node*> scoped_allocator_instances;
+  for (const Node* n : g->nodes()) {
+    NodeItem* item = node(n->id());
+    AllocatorAttributes* attrs = item->output_attr_base();
     if (IsScopedAllocator(n)) {
       scoped_allocator_instances.push_back(n);
     }
 
     // Examine the out edges of each node looking for special use
     // cases that may affect memory allocation attributes.
-    for (const auto &e : n->out_edges()) {
+    for (const auto& e : n->out_edges()) {
       if (!e->IsControlEdge()) {
         AllocatorAttributes attr;
         s = InferAllocAttr(n, e->dst(), local_dev_name, &attr);
@@ -273,7 +285,7 @@ Status GraphView::SetAllocAttrs(const Graph *g, const Device *device) {
     }
 
     for (int out = 0; out < n->num_outputs(); out++) {
-      const OpKernel *op_kernel = item->kernel;
+      const OpKernel* op_kernel = item->kernel;
       DCHECK_LT(out, op_kernel->output_memory_types().size());
       bool on_host = op_kernel->output_memory_types()[out] == HOST_MEMORY;
       if (on_host) {
@@ -287,9 +299,9 @@ Status GraphView::SetAllocAttrs(const Graph *g, const Device *device) {
   return s;
 }
 
-bool ExtractScopedAllocatorAttr(const std::vector<int> &sc_attr,
+bool ExtractScopedAllocatorAttr(const std::vector<int>& sc_attr,
                                 int output_index,
-                                AllocatorAttributes *alloc_attr) {
+                                AllocatorAttributes* alloc_attr) {
   DCHECK_LE(2, sc_attr.size());
   for (int i = 0; i < sc_attr.size(); i += 2) {
     if (sc_attr[i] == output_index) {
@@ -301,9 +313,9 @@ bool ExtractScopedAllocatorAttr(const std::vector<int> &sc_attr,
   return false;
 }
 
-Status InferAllocAttr(const Node *n, const Node *dst,
-                      const DeviceNameUtils::ParsedName &local_dev_name,
-                      AllocatorAttributes *attr) {
+Status InferAllocAttr(const Node* n, const Node* dst,
+                      const DeviceNameUtils::ParsedName& local_dev_name,
+                      AllocatorAttributes* attr) {
   Status s;
   // Note that it's possible for *n to be a Recv and *dst to be a Send,
   // so these two cases are not mutually exclusive.
@@ -322,7 +334,7 @@ Status InferAllocAttr(const Node *n, const Node *dst,
       attr->set_nic_compatible(true);
       VLOG(2) << "node " << n->name() << " is the sink of an RPC in";
     } else if ((local_dev_name.type == "CPU" || n->IsHostRecv()) &&
-        parsed_src_name.type != "CPU") {
+               parsed_src_name.type != "CPU") {
       // Value is going to be the sink of a local DMA from GPU to CPU (or
       // other types of accelerators).
       attr->set_gpu_compatible(true);
@@ -347,7 +359,7 @@ Status InferAllocAttr(const Node *n, const Node *dst,
       attr->set_nic_compatible(true);
       VLOG(2) << "node " << n->name() << " is the source of an RPC out";
     } else if ((local_dev_name.type == "CPU" || dst->IsHostSend()) &&
-        parsed_dst_name.type != "CPU") {
+               parsed_dst_name.type != "CPU") {
       // Value is going to be the source of a local DMA from CPU to GPU (or
       // other types of accelerators).
       // Note that this does not cover the case where the allocation of the
@@ -367,7 +379,5 @@ Status InferAllocAttr(const Node *n, const Node *dst,
   return s;
 }
 
-
-
-} // namespace executor
-}// namespace tensorflow
+}  // namespace executor
+}  // namespace tensorflow

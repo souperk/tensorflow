@@ -93,6 +93,7 @@ class Executor {
     CallFrameInterface* call_frame = nullptr;
     CancellationManager* cancellation_manager = nullptr;
     SessionState* session_state = nullptr;
+
     // Unique session identifier. Can be empty.
     string session_handle;
     TensorStore* tensor_store = nullptr;
@@ -107,6 +108,7 @@ class Executor {
     typedef std::function<void(Closure)> Runner;
     Runner runner = nullptr;
   };
+
   typedef std::function<void(const Status&)> DoneCallback;
   virtual void RunAsync(const Args& args, DoneCallback done) = 0;
 
