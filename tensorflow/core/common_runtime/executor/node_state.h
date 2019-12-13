@@ -30,17 +30,15 @@ class NodeState {
   NodeState() = default;
   ~NodeState() = default;
 
-  bool IsDead() { return state_ == Dead; }
-  bool IsReady() { return state_ == Ready; }
-  bool IsAvailable() { return state_ == Available; }
-  bool IsDemanded() { return demands_ > 0; }
+  bool IsDead() const { return state_ == Dead; }
+  bool IsDemanded() const { return demands_ > 0; }
 
   void SetReady() {
     state_ = Ready;
   }
 
   void OnComputed(bool is_dead) {
-    CHECK(state_ == Ready);
+    DCHECK(state_ == Ready);
 
     if (is_dead) {
       state_ = Dead;
@@ -69,7 +67,7 @@ class NodeState {
   }
 
   void OnDependencyFinished(bool is_dead) {
-    CHECK(pending_ > 0);
+    DCHECK(pending_ > 0);
 
     if (is_dead) {
       Kill();
@@ -87,7 +85,7 @@ class NodeState {
   }
 
   void RemoveDemand() {
-//    CHECK(demands_ > 0);
+    DCHECK(demands_ > 0);
     demands_--;
   }
 

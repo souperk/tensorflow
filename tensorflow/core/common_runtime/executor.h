@@ -148,6 +148,7 @@ struct LocalExecutorParams {
 
   Executor::RendezvousFactory rendezvous_factory;
 };
+
 ::tensorflow::Status NewLocalExecutor(const LocalExecutorParams& params,
                                       std::unique_ptr<const Graph> graph,
                                       Executor** executor);

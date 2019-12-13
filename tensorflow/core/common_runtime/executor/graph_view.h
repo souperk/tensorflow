@@ -92,6 +92,7 @@ struct NodeItem {
 
   // Variable length section starts immediately after *this
   // (uint8 is enough for DataType).
+  //   EdgeInfo            in_edges[num_in_edges];
   //   EdgeInfo            out_edges[num_out_edges];
   //   AllocatorAttributes output_attr[num_outputs];
   //   int                 forward_from[num_outputs];
