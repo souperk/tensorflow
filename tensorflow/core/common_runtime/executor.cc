@@ -71,6 +71,8 @@ limitations under the License.
 #include "tensorflow/core/profiler/internal/traceme_recorder.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/util/tensor_slice_reader_cache.h"
+#include "tensorflow/core/common_runtime/executor/memory_utils.h"
+
 
 namespace tensorflow {
 namespace {
@@ -1278,6 +1280,7 @@ class ExecutorState {
   bool sync_on_finish_;
 
   // Owned.
+  executor::MemoryWatch memory_watch_{};
 
   // A flag that is set on error after the frame state has been
   // dumped for diagnostic purposes.
@@ -1686,6 +1689,7 @@ void ExecutorState::Process(TaggedNode tagged_node, int64 scheduled_nsec) {
   bool completed = false;
   inline_ready.push_back(tagged_node);
   while (!inline_ready.empty()) {
+    memory_watch_.Update();
     tagged_node = inline_ready.front();
     inline_ready.pop_front();
     const Node *node = tagged_node.node;
@@ -2538,11 +2542,15 @@ void ExecutorState::Finish() {
     // methods have completed, this ensures that control is not returned to
     // the user until the step (and its side-effects) has actually completed.
     device->Sync([=](Status new_status) mutable {
+      LOG(INFO) << "Memory Usage :: " << memory_watch_.min_memory() << " - " << memory_watch_.max_memory();
+
       status.Update(new_status);
       delete this;
       runner([=]() { done_cb(status); });
     });
   } else {
+    LOG(INFO) << "Memory Usage :: " << memory_watch_.min_memory() << " - " << memory_watch_.max_memory();
+
     delete this;
     runner([=]() { done_cb(status); });
   }

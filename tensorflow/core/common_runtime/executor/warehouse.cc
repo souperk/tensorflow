@@ -16,13 +16,16 @@ limitations under the License.
 #include "warehouse.h"
 
 #include "tensorflow/core/platform/logging.h"
+#include "tensorflow/core/common_runtime/executor/graph_view.h"
 
 namespace tensorflow {
 namespace executor {
 
 bool AnyReferenceTypes(const EntryVector &vector);
+bool IsSourceNode(const GraphView &graph_view, int64 node_id);
 
-Warehouse::Warehouse(WarehouseStrategy strategy) : strategy_(strategy) {
+Warehouse::Warehouse(WarehouseStrategy strategy, const GraphView &graph_view)
+    : strategy_(strategy), graph_view_(graph_view) {
 
 }
 
@@ -50,13 +53,9 @@ bool Warehouse::Request(int64 node_id, EntryVector &output_vector) {
 void Warehouse::Register(int64 node_id, const EntryVector &output_vector) {
   mutex_lock lock(mu_);
 
-  if (node_id == 1028) {
-    LOG(INFO) << "1028 AnyReferenceTypes() == " << AnyReferenceTypes(output_vector);
-  }
-
-  // a race condition exists where a node may be requested
-  // and evaluated by two nodes when
-  if (strategy_ == MemoryRich || AnyReferenceTypes(output_vector)) {
+  bool cache_source_nodes = false;
+  if (strategy_ == MemoryRich || AnyReferenceTypes(output_vector)
+      || (cache_source_nodes && IsSourceNode(graph_view_, node_id))) {
     WarehouseEntry &warehouse_entry = live_entry_map_[node_id];
     CHECK(!warehouse_entry.IsInitialized());
     warehouse_entry.Initialize(output_vector);
@@ -71,6 +70,11 @@ void Warehouse::WarehouseEntry::Initialize(const EntryVector &output_vector) {
   for (size_t i = 0; i < size_; i++) {
     outputs_[i] = output_vector[i];
   }
+}
+
+bool IsSourceNode(const GraphView &graph_view, int64 node_id) {
+  const NodeItem &node_item = *graph_view.node(node_id);
+  return node_item.num_input_edges == 0;
 }
 
 bool AnyReferenceTypes(const EntryVector &vector) {

@@ -75,11 +75,13 @@ limitations under the License.
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/util/tensor_slice_reader_cache.h"
 #include "tensorflow/core/common_runtime/executor/warehouse.h"
+#include "tensorflow/core/common_runtime/executor/memory_utils.h"
 
 #define TRACE() do { LOG(INFO) << "TRACEME : " << __func__ << "@" << __LINE__; } while(false)
 #define LOGVAR(VAR) do { LOG(INFO) << #VAR << " : " << (VAR) << " " << __func__ << "@" << __LINE__; } while(false)
 
 #define NODE_SLOT(node, slot) "[" << node->id() << "::" << slot << "]"
+#define NODE_NAME(node) "[" << node->name() << "::" << node->id() << "]"
 
 namespace tensorflow {
 namespace {
@@ -109,6 +111,7 @@ Status ProcessOutputs(
     OpKernelContext *ctx,
     EntryVector &outputs_vector,
     DeviceContextMap &device_context_map);
+
 
 // 1-D, 0 element tensor.
 static const Tensor *const kEmptyTensor = new Tensor;
@@ -258,21 +261,21 @@ Status OnDemandExecutor::Initialize() {
   for (const Node *n : graph_->nodes()) {
     const int id = n->id();
 
-    LOG(INFO) << "initializing node [" << n->name() << "::" << n->id() << "] with"
-              << " " << n->num_inputs() << " inputs"
-              << ", " << n->in_edges().size() << " input edges"
-              << ", " << n->num_inputs() << " outputs"
-              << ", " << n->out_edges().size() << " output edges";
+//    LOG(INFO) << "initializing node [" << n->name() << "::" << n->id() << "] with"
+//              << " " << n->num_inputs() << " inputs"
+//              << ", " << n->in_edges().size() << " input edges"
+//              << ", " << n->num_inputs() << " outputs"
+//              << ", " << n->out_edges().size() << " output edges";
 
-    for (const Edge *edge: n->out_edges()) {
-      LOG(INFO) << "output edge to [" << edge->dst()->name() << "::" << edge->dst()->id() << "] : "
-                << (edge->IsControlEdge() ? "is control edge" : "is not control edge");
-    }
+//    for (const Edge *edge: n->out_edges()) {
+//      LOG(INFO) << "output edge to [" << edge->dst()->name() << "::" << edge->dst()->id() << "] : "
+//                << (edge->IsControlEdge() ? "is control edge" : "is not control edge");
+//    }
 
     // TODO(souperk) decide if out_edges().empty() is preferable to IsSink() ||
     //  IsSend()
     if (n->out_edges().empty()) {
-      LOG(INFO) << "adding node " << n->name() << " to root_nodes_";
+//      LOG(INFO) << "adding node " << n->name() << " to root_nodes_";
       root_nodes_.push_back(n);
     }
 
@@ -325,43 +328,6 @@ struct TaggedNode {
 
 typedef gtl::InlinedVector<TaggedNode, 8> TaggedNodeSeq;
 
-// A drop-in replacement for std::deque<TaggedNode>.  We typically don't
-// have that many nodes in the ready queue, so we just use a vector and
-// don't free up memory from the queue as we consume nodes.
-class TaggedReadyNodeQueue {
- public:
-  TaggedReadyNodeQueue() : front_index_(0) {}
-
-  void push_back(TaggedNode node) { ready_.push_back(node); }
-  TaggedNode front() const {
-    DCHECK_LT(front_index_, ready_.size());
-    return ready_[front_index_];
-  }
-
-  void pop_front() {
-    DCHECK_LT(front_index_, ready_.size());
-    front_index_++;
-    if ((front_index_ == ready_.size()) || (front_index_ > 16384)) {
-      if (front_index_ == ready_.size()) {
-        ready_.clear();
-      } else {
-        // Lots of unused entries at beginning of vector: move everything
-        // down to start of vector.
-        ready_.erase(ready_.begin(), ready_.begin() + front_index_);
-      }
-      front_index_ = 0;
-    }
-  }
-  bool empty() const { return ready_.empty(); }
-
-  const TaggedNode *begin() const { return ready_.begin() + front_index_; }
-  const TaggedNode *end() const { return ready_.end(); }
-
- private:
-  gtl::InlinedVector<TaggedNode, 16> ready_;
-  int front_index_;
-};
-
 class ExecutionStep {
 
  public:
@@ -403,8 +369,6 @@ class ExecutorState {
   // device at the beginning of a step.
   DeviceContextMap device_context_map_;
 
-  struct AsyncState;
-
   const bool vlog_;  // true if VLOG_IS_ON(1). Used to check vlog cheaply.
 
   // true if LogMemory::IsEnabled(). Used to check memory enabled cheaply.
@@ -438,6 +402,7 @@ class ExecutorState {
   bool sync_on_finish_;
 
   // Owned.
+  executor::MemoryWatch memory_watch_{};
   Warehouse *warehouse_;
   IterationState *iteration_state_;
   ExecutionContext *execution_context_;
@@ -459,12 +424,12 @@ class ExecutorState {
   mutex mu_;
   Status status_ GUARDED_BY(mu_);
 
-  std::stack<ExecutionStep> demand_stack_ GUARDED_BY(mu_);
-
   // utillity shorthand
   void Demand(TaggedNode demanded_node) {
     LOGVAR(demanded_node.node);
-    EntryVector outputs;
+    const NodeItem &node_item = *execution_context_->node(demanded_node.id());
+    EntryVector outputs(node_item.num_outputs);
+
     Demand(demanded_node, outputs);
   }
 
@@ -511,7 +476,7 @@ ExecutorState::ExecutorState(const Executor::Args &args, ExecutionContext *execu
         device->name(), device, false, false, args.user_intra_op_threadpool);
   }
 
-  warehouse_ = new Warehouse(executor::WarehouseStrategy::MemoryPoor);
+  warehouse_ = new Warehouse(executor::WarehouseStrategy::MemoryPoor, *execution_context_->graph_view());
   iteration_state_ = new IterationState();
 }
 
@@ -566,39 +531,40 @@ void ExecutorState::RunAsync(Executor::DoneCallback done) {
 
 void ExecutorState::Demand(TaggedNode demanded_node, EntryVector &outputs_vector) {
 
+  LOG(INFO) << "node " << NODE_NAME(demanded_node.node) << " - demanded";
+
   if (warehouse_->Request(demanded_node.id(), outputs_vector)) {
-    // result is ready
+    // result is available
     return;
   }
 
   const GraphView &graph_view = *execution_context_->graph_view();
   const NodeItem &dst_item = *graph_view.node(demanded_node.id());
-  ExecutionStep *execution_step = new ExecutionStep(demanded_node, dst_item);
+  auto *execution_step = new ExecutionStep(demanded_node, dst_item);
   EntryVector &inputs_vector = execution_step->inputs();
 
-  LOG(INFO) << "node [" << dst_item.node->name() << "::" << dst_item.node->id() << "] - demanded";
 
   const EdgeInfo *edges = dst_item.input_edge_list();
   for (int in_index = 0; in_index < dst_item.num_input_edges; in_index++) {
     const EdgeInfo &input_edge = edges[in_index];
     const NodeItem &src_item = *graph_view.node(input_edge.dst_id);
 
-    LOG(INFO) << "processing edge [" << src_item.node->name() << "::" << src_item.node->id() << " -> "
-              << dst_item.node->name() << "::" << dst_item.node->id() << "]";
+    LOG(INFO) << "processing edge ["
+              << NODE_NAME(src_item.node) << " -> " << NODE_NAME(dst_item.node)
+              << "]";
 
     const bool is_control_edge = (input_edge.input_slot == Graph::kControlSlot);
 
-    EntryVector results_vector;
+    EntryVector results_vector(src_item.num_outputs);
     Demand(TaggedNode(src_item.node, false), results_vector);
 
     if (!is_control_edge) {
       LOG(INFO) << "copying " << NODE_SLOT(src_item.node, input_edge.input_slot) << " to "
                 << NODE_SLOT(dst_item.node, input_edge.output_slot);
-      if (IsRefType(dst_item.input_type(input_edge.output_slot))
-          && results_vector[input_edge.input_slot].ref == nullptr) {
-        LOG(INFO) << "expects ref but it's not";
-      }
+
       inputs_vector[input_edge.output_slot] = results_vector[input_edge.input_slot];
+    } else {
+      LOG(INFO) << NODE_SLOT(dst_item.node, input_edge.output_slot) << " - is control edge";
     }
   }
 
@@ -610,6 +576,11 @@ void ExecutorState::Demand(TaggedNode demanded_node, EntryVector &outputs_vector
 }
 
 void ExecutorState::Process(TaggedNode tagged_node, EntryVector &inputs_vector, EntryVector &outputs_vector) {
+  memory_watch_.Update();
+  static size_t processed_count = 0;
+  processed_count++;
+  LOGVAR(processed_count);
+
   WithContext wc(context_);
   const GraphView &graph_view = *execution_context_->graph_view();
 
@@ -696,6 +667,7 @@ void ExecutorState::Process(TaggedNode tagged_node, EntryVector &inputs_vector, 
   s = PrepareInputs(item, inputs_vector, &inputs, &input_device_contexts, &input_alloc_attrs);
   if (!s.ok()) {
     TRACE();
+
     // Clear inputs.
     int num_inputs = item.num_inputs;
     for (int i = 0; i < num_inputs; ++i) {
@@ -716,7 +688,6 @@ void ExecutorState::Process(TaggedNode tagged_node, EntryVector &inputs_vector, 
   if (item.kernel_is_async) {
     CHECK(false); // async kernels not supported right now
   } else {
-    TRACE();
     // Synchronous computes.
     OpKernelContext ctx(&params, item.num_outputs);
 
@@ -756,9 +727,7 @@ Status PrepareInputs(
     DeviceContextVec *input_device_contexts,
     AllocatorAttributeVec *input_alloc_attrs) {
 
-  DCHECK(item.num_inputs == entries.size());
-  LOG(INFO) << "node [" << item.node->name() << "::" << item.node->id() << "] : input preparation started";
-
+  CHECK(entries.size() == item.num_inputs);
   inputs->clear();
   inputs->resize(item.num_inputs);
   input_device_contexts->clear();
@@ -767,6 +736,7 @@ Status PrepareInputs(
   input_alloc_attrs->resize(item.num_inputs);
 
   for (int i = 0; i < item.num_inputs; ++i) {
+    LOG(INFO) << "preparing " << NODE_SLOT(item.node, i);
     const bool expect_ref = IsRefType(item.input_type(i));
 
     Entry &entry = entries.at(i);
@@ -778,17 +748,8 @@ Status PrepareInputs(
 
     DCHECK(entry.has_value);
 
-    TRACE();
-    LOGVAR(entry.has_value);
-    LOGVAR(entry.ref);
-    LOGVAR(expect_ref);
-
     if (entry.ref == nullptr) {
-      TRACE();
-      LOGVAR(item.kernel);
       if (expect_ref) {
-        LOG(INFO) << "[" << item.node->id() << "::" << i << "] - expects ref";
-
         return AttachDef(
             errors::InvalidArgument(i, "-th input expects a ref type"),
             item.kernel->def());
@@ -796,11 +757,10 @@ Status PrepareInputs(
 
       inp->tensor = entry.val.get();
     } else {
-      TRACE();
-      LOGVAR(expect_ref);
-
       {
+        // TODO(souperk) this is suspected to cause deadlocks
         tf_shared_lock ml(*entry.ref_mu);
+
         if (!entry.ref->IsInitialized() && !IsInitializationOp(item.node)) {
           return AttachDef(errors::FailedPrecondition(
               "Attempting to use uninitialized value ",
@@ -808,7 +768,6 @@ Status PrepareInputs(
                            item.kernel->def());
         }
       }
-
 
       if (expect_ref) {
         inp->mutex_if_ref = entry.ref_mu;
@@ -845,6 +804,8 @@ Status PrepareInputs(
         }
       }
     }
+
+    LOG(INFO) << "dtype = " << DataTypeString(inp->tensor->dtype());
   }  // end for
 
   return Status::OK();
@@ -893,13 +854,13 @@ Status ProcessOutputs(
                                   FormatNodeForError(*node)));
       }
     } else {
-      Entry &out = outputs_vector.at(i);
+      Entry &output_entry = outputs_vector.at(i);
 
       // Set the device context of the output entry.
-      out.device_context = device_context;
+      output_entry.device_context = device_context;
 
       // Set the allocator attributes of the output entry.
-      out.alloc_attr = ctx->output_alloc_attr(i);
+      output_entry.alloc_attr = ctx->output_alloc_attr(i);
 
       // Sanity check of output tensor types. We need to inspect this safely as
       // we are in the tensor buffer.
@@ -908,16 +869,16 @@ Status ProcessOutputs(
 
         if (val.is_ref()) {
           LOG(INFO) << "[" << node->id() << "::" << i << "] - is ref";
-          out.has_value = true;
-          out.ref = val.tensor;
-          out.ref_mu = val.mutex_if_ref;
+          output_entry.has_value = true;
+          output_entry.ref = val.tensor;
+          output_entry.ref_mu = val.mutex_if_ref;
         } else {
           // NOTE that std::move is used here, so val.tensor goes to
           // uninitialized state (val.tensor->IsInitialized return false).
-          DCHECK(!out.val_field_is_set);
-          out.has_value = true;
-          out.val_field_is_set = true;
-          out.val.Init(std::move(*val.tensor));
+          DCHECK(!output_entry.val_field_is_set);
+          output_entry.has_value = true;
+          output_entry.val_field_is_set = true;
+          output_entry.val.Init(std::move(*val.tensor));
         }
       } else {
         s.Update(errors::Internal("Output ", i, " of type ",
@@ -1025,17 +986,20 @@ void ExecutorState::Finish() {
     return;
   }
 
+
   if (sync_on_finish_ && status.ok()) {
     // Block until the device has finished all queued operations. For
     // devices like GPUs that continue to execute Ops after their Compute
     // methods have completed, this ensures that control is not returned to
     // the user until the step (and its side-effects) has actually completed.
     device->Sync([=](Status new_status) mutable {
+      LOG(INFO) << "Memory Usage :: " << memory_watch_.min_memory() << " - " << memory_watch_.max_memory();
       status.Update(new_status);
       delete this;
       runner([=]() { done_cb(status); });
     });
   } else {
+    LOG(INFO) << "Memory Usage :: " << memory_watch_.min_memory() << " - " << memory_watch_.max_memory();
     delete this;
     runner([=]() { done_cb(status); });
   }

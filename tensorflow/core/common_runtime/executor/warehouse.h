@@ -21,6 +21,7 @@ limitations under the License.
 #include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/lib/gtl/manual_constructor.h"
+#include "tensorflow/core/common_runtime/executor/graph_view.h"
 
 namespace tensorflow {
 namespace executor {
@@ -71,15 +72,18 @@ struct Entry {
     if (val_field_is_set) {
       val.Destroy();
     }
+
     ref = other.ref;
     ref_mu = other.ref_mu;
     has_value = other.has_value;
     val_field_is_set = other.val_field_is_set;
     alloc_attr = other.alloc_attr;
     device_context = other.device_context;
+
     if (val_field_is_set) {
       val.Init(std::move(*other.val));
     }
+
     return *this;
   }
 
@@ -116,13 +120,14 @@ typedef gtl::InlinedVector<Entry, 4> EntryVector;
 class Warehouse {
 
  public:
-  explicit Warehouse(WarehouseStrategy strategy);
+  explicit Warehouse(WarehouseStrategy strategy, const GraphView &graph_view);
 
-  bool Request(int64 node_id, EntryVector& outputs_vector);
+  bool Request(int64 node_id, EntryVector &outputs_vector);
   void Register(int64 node_id, const EntryVector &outputs_vector);
 
  private:
   WarehouseStrategy strategy_;
+  const GraphView &graph_view_;
 
   mutex mu_;
   class WarehouseEntry;
@@ -144,7 +149,7 @@ class Warehouse {
 
     bool IsInitialized() const { return size_ > 0; }
     const Entry *outputs() const { return outputs_; }
-    const Entry& entry(size_t index) const { return outputs_[index]; }
+    const Entry &entry(size_t index) const { return outputs_[index]; }
     size_t size() const { return size_; }
 
     void Initialize(const EntryVector &outputs_vector);
